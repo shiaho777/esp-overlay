@@ -3,12 +3,17 @@
 #include "memory_reader.h"
 #include "il2cpp_resolver.h"
 #include "offset_resolver.h"
+#include "offset_table.h"
+#include <android/log.h>
 #include <array>
 #include <vector>
 #include <mutex>
 #include <atomic>
 #include <thread>
 #include <condition_variable>
+
+#define ESP_LOGI(...) __android_log_print(ANDROID_LOG_INFO, "ESP", __VA_ARGS__)
+#define ESP_LOGE(...) __android_log_print(ANDROID_LOG_ERROR, "ESP", __VA_ARGS__)
 
 namespace esp {
 
@@ -71,6 +76,14 @@ public:
     bool init(std::unique_ptr<MemoryReader> reader,
               uintptr_t il2cpp_base, uintptr_t gamecore_base);
 
+    /// Load a revx-produced offset table (offsets.json). Optional: when absent
+    /// the engine falls back to its runtime heuristics. Returns false when the
+    /// file exists but fails validation.
+    bool load_offset_table(const std::string& path);
+
+    /// True if a validated offset table is in use.
+    bool has_offset_table() const { return offset_table_ != nullptr; }
+
     /// Set screen dimensions (called from Java).
     void set_screen_size(int w, int h) {
         screen_width_ = w;
@@ -103,6 +116,11 @@ private:
     /// Read the camera VP matrix from the game.
     bool read_camera_matrix(Matrix4x4& view, Matrix4x4& proj);
 
+    /// Offset-table path through read_camera_matrix: Camera.current via the
+    /// table's static_fields_offset, then table-supplied matrix offsets.
+    /// Returns false (heuristics continue) on any table miss.
+    bool read_camera_matrix_via_table(uintptr_t camera_klass, Matrix4x4& view, Matrix4x4& proj);
+
     /// Scan for game entities (heroes, minions, etc.)
     bool scan_entities(std::vector<EntityInfo>& entities);
 
@@ -122,6 +140,9 @@ private:
     // Resolved offsets (cached)
     std::unordered_map<std::string, uint32_t> field_cache_;
     std::mutex cache_mutex_;
+
+    // revx-produced offset table (optional; nullptr = heuristic mode)
+    std::unique_ptr<OffsetTable> offset_table_;
 
     // Camera
     uintptr_t camera_klass_ = 0;

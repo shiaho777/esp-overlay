@@ -11,6 +11,7 @@ add_library(esp-native SHARED
     memory_reader.cpp
     il2cpp_resolver.cpp
     offset_resolver.cpp
+    offset_table.cpp
     esp_engine.cpp
 )
 

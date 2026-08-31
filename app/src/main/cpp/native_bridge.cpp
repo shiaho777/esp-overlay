@@ -150,6 +150,8 @@ Java_com_esp_core_EspNative_init(JNIEnv* env, jclass cls, jstring package_name) 
     }
 
     g_engine = std::make_unique<esp::EspEngine>();
+    // Optional revx offset table; same contract as the Shizuku path.
+    g_engine->load_offset_table("/data/data/com.esp.overlay/files/offsets.json");
     if (g_engine->init(std::move(reader), base, reader->get_module_base("libGameCore.so"))) {
         LOGI("ESP engine initialized (direct mode)");
         return JNI_TRUE;
@@ -208,6 +210,14 @@ Java_com_esp_core_EspNative_initWithShizuku(JNIEnv* env, jclass cls,
 
     // Create and init engine
     g_engine = std::make_unique<esp::EspEngine>();
+    // Optional revx offset table: app files dir offsets.json, pushed via adb.
+    // Load failure only disables the fast path; heuristics stay intact.
+    std::string offsets_path = "/data/data/com.esp.overlay/files/offsets.json";
+    if (g_engine->load_offset_table(offsets_path)) {
+        LOGI("offset table active: %s", offsets_path.c_str());
+    } else {
+        LOGI("no usable offset table at %s; heuristic mode", offsets_path.c_str());
+    }
     if (g_engine->init(std::move(reader),
                        static_cast<uintptr_t>(il2cpp_base),
                        static_cast<uintptr_t>(gamecore_base))) {

@@ -98,6 +98,20 @@ uint32_t EspEngine::resolve_field(uintptr_t klass, const std::string& name) {
     return offset;
 }
 
+bool EspEngine::load_offset_table(const std::string& path) {
+    auto table = std::make_unique<OffsetTable>();
+    std::string error;
+    if (!OffsetTable::load(path, *table, error)) {
+        ESP_LOGE("offset table load failed: %s", error.c_str());
+        return false;
+    }
+    ESP_LOGI("offset table loaded: binary=%s version=%d classes=%zu globals=%zu methods=%zu",
+             table->binary_name().c_str(), table->table_version(),
+             table->class_count(), table->global_count(), table->method_count());
+    offset_table_ = std::move(table);
+    return true;
+}
+
 void EspEngine::update_loop() {
     while (running_) {
         EspConfig cfg = get_config();
@@ -157,6 +171,17 @@ bool EspEngine::read_camera_matrix(Matrix4x4& view, Matrix4x4& proj) {
         camera_klass_ = offset_resolver_->find_class_by_name(
             "UnityEngine", "Camera", type_table, 50000);
         if (!camera_klass_) return false;
+    }
+
+    // Offset-table fast path: static_fields_offset and matrix offsets come from
+    // the revx-produced table; on any miss fall through to the version heuristics.
+    if (offset_table_) {
+        Matrix4x4 table_view, table_proj;
+        if (read_camera_matrix_via_table(camera_klass_, table_view, table_proj)) {
+            view = table_view;
+            proj = table_proj;
+            return true;
+        }
     }
 
     // Get static fields data pointer
@@ -236,6 +261,56 @@ bool EspEngine::read_camera_matrix(Matrix4x4& view, Matrix4x4& proj) {
         }
     }
 
+    return false;
+}
+
+bool EspEngine::read_camera_matrix_via_table(uintptr_t camera_klass, Matrix4x4& view,
+                                             Matrix4x4& proj) {
+    if (!offset_table_ || !reader_) return false;
+
+    const FieldOffset* current =
+        offset_table_->find_field("UnityEngine.Camera", "current");
+    if (current == nullptr || current->offset == 0) return false;
+
+    uint32_t static_fields_offset = 0;
+    if (const ClassOffsets* camera = offset_table_->find_class("UnityEngine.Camera")) {
+        if (camera->has_static_fields) {
+            static_fields_offset = camera->static_fields_offset;
+        }
+    }
+
+    uintptr_t static_data = 0;
+    if (!reader_->read_t(camera_klass + 0x68, static_data) || !static_data) {
+        return false;
+    }
+    if (static_fields_offset) {
+        // The table's static_fields_offset is the Il2CppClass member offset
+        // where the static-fields pointer lives; re-deref from the class.
+        static_data = 0;
+        if (!reader_->read_t(camera_klass + static_fields_offset, static_data) || !static_data) {
+            return false;
+        }
+    }
+
+    uintptr_t camera_obj = 0;
+    if (!reader_->read_t(static_data + current->offset, camera_obj) || !camera_obj) {
+        return false;
+    }
+
+    const GlobalOffset* view_off_global = offset_table_->find_global("UnityEngine.Camera.worldToCameraMatrix");
+    const GlobalOffset* proj_off_global = offset_table_->find_global("UnityEngine.Camera.projectionMatrix");
+    if (view_off_global == nullptr || proj_off_global == nullptr) return false;
+
+    uint32_t view_off = static_cast<uint32_t>(view_off_global->address);
+    uint32_t proj_off = static_cast<uint32_t>(proj_off_global->address);
+    if (view_off == 0 || proj_off == 0) return false;
+
+    if (!reader_->read(camera_obj + view_off, view.m, sizeof(view.m))) return false;
+    if (!reader_->read(camera_obj + proj_off, proj.m, sizeof(proj.m))) return false;
+
+    // Same perspective sanity check as the heuristic path.
+    if (proj.m[11] < -0.5f && proj.m[11] > -2.0f) return true;
+    if (proj.m[14] < -0.5f && proj.m[14] > -2.0f) return true;
     return false;
 }
 
